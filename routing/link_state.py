@@ -3,6 +3,8 @@ import heapq
 import time
 from .base import RoutingAlgorithm
 
+import threading
+
 class LinkState(RoutingAlgorithm):
 	def __init__(self, node_id, neighbors):
 		super().__init__(node_id, neighbors)
@@ -10,6 +12,20 @@ class LinkState(RoutingAlgorithm):
 		self.lsdb = {node_id: dict(neighbors)}
 		self.seen_lsas = set()  # (origin, seq)
 		self.seq = 0
+		self._periodic_flooding_started = False
+
+	def start_periodic_flooding(self, transport, nodes_ports, interval=2.0, duration=8.0):
+		"""Reenvía LSAs cada 'interval' segundos durante 'duration' segundos tras el arranque."""
+		if self._periodic_flooding_started:
+			return
+		self._periodic_flooding_started = True
+		def flood_loop():
+			import time
+			start = time.time()
+			while time.time() - start < duration:
+				self.flood_lsa(transport, nodes_ports, initial_delay=0)
+				time.sleep(interval)
+		threading.Thread(target=flood_loop, daemon=True).start()
 
 	def create_lsa(self):
 		self.seq += 1
@@ -47,18 +63,26 @@ class LinkState(RoutingAlgorithm):
 			try:
 				transport.send("127.0.0.1", nh_port, fwd)
 			except Exception as e:
-				print(f"[LSR] Error reenviando LSA a {neigh}: {e}")
+				# print(f"[LSR] Error reenviando LSA a {neigh}: {e}")
+				pass
 
-	def flood_lsa(self, transport, nodes_ports):
+	def flood_lsa(self, transport, nodes_ports, initial_delay=1.5):
+		import time
+		if initial_delay > 0:
+			#print(f"[LSR][{self.node_id}] Esperando {initial_delay} segundos antes de floodear LSA...")
+			time.sleep(initial_delay)
 		lsa = self.create_lsa()
+		print(f"[LSR][{self.node_id}] Flooding LSA a vecinos: {list(self.neighbors.keys())}")
 		for neigh in self.neighbors:
 			nh_port = nodes_ports[neigh]
 			fwd = dict(lsa)
 			fwd["last_hop"] = self.node_id
 			try:
+				print(f"[LSR][{self.node_id}] Enviando LSA a {neigh} (puerto {nh_port})")
 				transport.send("127.0.0.1", nh_port, fwd)
 			except Exception as e:
-				print(f"[LSR] Error enviando LSA a {neigh}: {e}")
+				# print(f"[LSR] Error enviando LSA a {neigh}: {e}")
+				pass
 
 	def compute_routes(self, topology):
 		# Asegura que la LSDB tenga entradas para todos los nodos
@@ -94,4 +118,5 @@ class LinkState(RoutingAlgorithm):
 			if prev[current]:
 				table[dest] = current
 		self.routing_table = table
+		print(f"[LSR][{self.node_id}] Tabla de enrutamiento actualizada: {self.routing_table}")
 		return table

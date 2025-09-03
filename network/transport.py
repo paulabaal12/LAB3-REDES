@@ -38,4 +38,5 @@ class TCPTransport:
             with socket.create_connection((target_host, target_port), timeout=2) as s:
                 s.sendall(json.dumps(message).encode())
         except Exception as e:
-            print(f"[TCP] Error sending to {target_host}:{target_port} -> {e}")
+            # print(f"[TCP] Error sending to {target_host}:{target_port} -> {e}")
+            pass
