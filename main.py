@@ -1,11 +1,13 @@
 import argparse
 import uuid
+import time
 from network.transport import TCPTransport
 from network.protocol import make_message
 from network.topo_loader import load_topology, load_names
 from routing.dijkstra import Dijkstra
 from routing.flooding import Flooding
 from routing.link_state import LinkState
+from routing.dvr import DistanceVector
 
 nodes_ports = load_names("names-ports.json")
 
@@ -16,14 +18,36 @@ transport = None
 
 def on_message(msg):
     msg["hops"] = int(msg.get("hops", 0))
-
+    if msg.get("type") == "HELLO":
+        print(f"[HELLO] Recibido HELLO de {msg.get('from')} (timestamp={msg.get('timestamp')})")
+        # Responder con PING si quieres medir latencia
+        if msg.get("payload") == "HELLO":
+            reply = dict(msg)
+            reply["type"] = "PING"
+            reply["from"] = node_id
+            reply["to"] = msg["from"]
+            reply["payload"] = "PING"
+            reply["timestamp_reply"] = time.time()
+            nh_port = nodes_ports.get(msg["from"], None)
+            if nh_port:
+                transport.send("127.0.0.1", nh_port, reply)
+        return
+    if msg.get("type") == "PING":
+        print(f"[PING] Recibido PING de {msg.get('from')} (timestamp={msg.get('timestamp_reply')})")
+        return
+    if msg.get("type") == "TABLE":
+        print(f"[INFO] Recibida tabla de ruteo de {msg.get('from')}: {msg.get('table')}")
+        return
     if isinstance(algo, Flooding):
         algo.handle_message(msg, transport, nodes_ports)
         return
-
     if isinstance(algo, LinkState):
         # Procesar mensajes LSA
         if msg.get("type") == "LSA":
+            algo.handle_message(msg, transport, nodes_ports)
+            return
+    if isinstance(algo, DistanceVector):
+        if msg.get("type") == "DV_UPDATE":
             algo.handle_message(msg, transport, nodes_ports)
             return
 
@@ -55,7 +79,7 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--id", required=True, help="Node ID (ej. A)")
-    parser.add_argument("--algo", required=True, choices=["dijkstra", "flooding", "linkstate"],
+    parser.add_argument("--algo", required=True, choices=["dijkstra", "flooding", "linkstate", "dvr"],
                         help="Algoritmo de enrutamiento a usar")
     parser.add_argument("--topo", required=True, help="Archivo de topología")
     parser.add_argument("--names", required=True, help="Archivo de nombres")
@@ -73,12 +97,16 @@ def main():
         algo = Flooding(node_id, neighbors)
     elif args.algo == "linkstate":
         algo = LinkState(node_id, neighbors)
+    elif args.algo == "dvr":
+        algo = DistanceVector(node_id, neighbors)
 
     print(f"[INFO] Nodo {node_id} usando algoritmo: {args.algo}")
 
     print("[INFO] Calculando tabla de enrutamiento...")
     if args.algo == "linkstate":
         table = algo.compute_routes(algo.lsdb)
+    elif args.algo == "dvr":
+        table = algo.compute_routes()
     else:
         table = algo.compute_routes(topology)
     print("[ROUTING TABLE]", table)
@@ -91,12 +119,16 @@ def main():
     # Flood inicial de LSA para LinkState
     if args.algo == "linkstate":
         algo.flood_lsa(transport, nodes_ports)
+    if args.algo == "dvr":
+        algo.flood_update(transport, nodes_ports)
 
     while True:
         print("\n========== MENU ==========")
         print("1. Enviar paquete")
         print("2. Escuchar mensajes (continuo)")
         print("3. Salir")
+        print("4. Enviar HELLO a vecino")
+        print("5. Enviar mi tabla de ruteo a vecino (TABLE/INFO)")
         choice = input("> ")
 
         if choice == "1":
@@ -115,6 +147,19 @@ def main():
                     except Exception as e:
                         print("Error enviando:", e)
             elif isinstance(algo, LinkState):
+                dest = input("Destino (ej. E): ").strip()
+                if dest not in algo.routing_table:
+                    print(f"No hay ruta hacia {dest}")
+                    continue
+                msg["to"] = dest
+                next_hop = algo.routing_table[dest]
+                try:
+                    nh_port = nodes_ports[next_hop]
+                    transport.send("127.0.0.1", nh_port, msg)
+                    print(f"[{node_id}] Enviado a {dest} via next hop {next_hop}")
+                except Exception as e:
+                    print("Error enviando:", e)
+            elif isinstance(algo, DistanceVector):
                 dest = input("Destino (ej. E): ").strip()
                 if dest not in algo.routing_table:
                     print(f"No hay ruta hacia {dest}")
@@ -148,7 +193,39 @@ def main():
         elif choice == "3":
             print("Saliendo de la red...")
             break
-
+        elif choice == "4":
+            dest = input("Vecino destino (ej. B): ").strip()
+            if dest not in neighbors:
+                print("No es vecino directo.")
+                continue
+            hello_msg = {
+                "proto": "hello",
+                "type": "HELLO",
+                "from": node_id,
+                "to": dest,
+                "payload": "HELLO",
+                "timestamp": time.time(),
+            }
+            nh_port = nodes_ports[dest]
+            transport.send("127.0.0.1", nh_port, hello_msg)
+            print(f"[HELLO] Enviado HELLO a {dest}")
+        elif choice == "5":
+            dest = input("Vecino destino (ej. B): ").strip()
+            if dest not in neighbors:
+                print("No es vecino directo.")
+                continue
+            table_msg = {
+                "proto": "table",
+                "type": "TABLE",
+                "from": node_id,
+                "to": dest,
+                "payload": "TABLE",
+                "table": getattr(algo, 'routing_table', {}),
+                "timestamp": time.time(),
+            }
+            nh_port = nodes_ports[dest]
+            transport.send("127.0.0.1", nh_port, table_msg)
+            print(f"[INFO] Enviada tabla de ruteo a {dest}")
         else:
             print("Opción inválida")
 
