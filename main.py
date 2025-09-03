@@ -5,7 +5,7 @@ from network.protocol import make_message
 from network.topo_loader import load_topology, load_names
 from routing.dijkstra import Dijkstra
 from routing.flooding import Flooding
-# from routing.link_state import LinkState
+from routing.link_state import LinkState
 
 nodes_ports = load_names("names-ports.json")
 
@@ -20,6 +20,12 @@ def on_message(msg):
     if isinstance(algo, Flooding):
         algo.handle_message(msg, transport, nodes_ports)
         return
+
+    if isinstance(algo, LinkState):
+        # Procesar mensajes LSA
+        if msg.get("type") == "LSA":
+            algo.handle_message(msg, transport, nodes_ports)
+            return
 
     dest = msg.get("to")
     if dest == node_id:
@@ -66,19 +72,25 @@ def main():
     elif args.algo == "flooding":
         algo = Flooding(node_id, neighbors)
     elif args.algo == "linkstate":
-        print("[WARN] Link State no implementado aún")
-        return
+        algo = LinkState(node_id, neighbors)
 
     print(f"[INFO] Nodo {node_id} usando algoritmo: {args.algo}")
 
     print("[INFO] Calculando tabla de enrutamiento...")
-    table = algo.compute_routes(topology)
+    if args.algo == "linkstate":
+        table = algo.compute_routes(algo.lsdb)
+    else:
+        table = algo.compute_routes(topology)
     print("[ROUTING TABLE]", table)
 
     transport = TCPTransport(args.host, nodes_ports[args.id], on_message)
     transport.start_server()
 
     print(f"\nNodo {node_id} conectado en {args.host}:{nodes_ports[args.id]}\n")
+
+    # Flood inicial de LSA para LinkState
+    if args.algo == "linkstate":
+        algo.flood_lsa(transport, nodes_ports)
 
     while True:
         print("\n========== MENU ==========")
@@ -102,6 +114,19 @@ def main():
                         print(f"[{node_id}] Flood inicial → {neigh}")
                     except Exception as e:
                         print("Error enviando:", e)
+            elif isinstance(algo, LinkState):
+                dest = input("Destino (ej. E): ").strip()
+                if dest not in algo.routing_table:
+                    print(f"No hay ruta hacia {dest}")
+                    continue
+                msg["to"] = dest
+                next_hop = algo.routing_table[dest]
+                try:
+                    nh_port = nodes_ports[next_hop]
+                    transport.send("127.0.0.1", nh_port, msg)
+                    print(f"[{node_id}] Enviado a {dest} via next hop {next_hop}")
+                except Exception as e:
+                    print("Error enviando:", e)
             else:
                 dest = input("Destino (ej. E): ").strip()
                 if dest not in algo.routing_table:
