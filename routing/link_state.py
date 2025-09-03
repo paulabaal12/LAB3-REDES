@@ -61,23 +61,31 @@ class LinkState(RoutingAlgorithm):
 				print(f"[LSR] Error enviando LSA a {neigh}: {e}")
 
 	def compute_routes(self, topology):
+		# Asegura que la LSDB tenga entradas para todos los nodos
+		all_nodes = set(topology.keys())
+		for node in all_nodes:
+			if node not in self.lsdb:
+				self.lsdb[node] = {}
 		# Ejecuta Dijkstra sobre la LSDB
-		dist = {node: float("inf") for node in topology}
-		prev = {node: None for node in topology}
+		dist = {node: float("inf") for node in self.lsdb}
+		prev = {node: None for node in self.lsdb}
 		dist[self.node_id] = 0
 		pq = [(0, self.node_id)]
 		while pq:
 			d, u = heapq.heappop(pq)
 			if d > dist[u]:
 				continue
-			for v, w in topology.get(u, {}).items():
+			for v, w in self.lsdb.get(u, {}).items():
+				if v not in dist:
+					dist[v] = float("inf")
+					prev[v] = None
 				alt = dist[u] + w
 				if alt < dist[v]:
 					dist[v] = alt
 					prev[v] = u
 					heapq.heappush(pq, (alt, v))
 		table = {}
-		for dest in topology:
+		for dest in self.lsdb:
 			if dest == self.node_id:
 				continue
 			current = dest
