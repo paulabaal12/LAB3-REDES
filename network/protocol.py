@@ -1,12 +1,12 @@
-import time
+import uuid
 
-def make_message(msg_type, from_id, to_id, payload=None, headers=None, hops=0):
+def make_message(proto, mtype, src, dst, payload, headers=None, ttl=32):
     return {
-        "type": msg_type,
-        "from": from_id,
-        "to": to_id,
-        "hops": hops,
+        "proto": proto,                        # algoritmo: dijkstra|flooding|lsr|dvr
+        "type": mtype,                         # tipo de mensaje: message|echo|info|hello
+        "from": f"{src}@localhost/{uuid.uuid4().hex[:6]}",  # formato foo@bar/123
+        "to": f"{dst}@localhost/000000",       # simplificado
+        "ttl": ttl,
         "headers": headers or {},
-        "payload": payload or "",
-        "timestamp": time.time()
+        "payload": payload,
     }

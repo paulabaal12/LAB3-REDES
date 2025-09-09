@@ -10,6 +10,7 @@ from routing.link_state import LinkState
 from routing.dvr import DistanceVector
 
 nodes_ports = load_names("names-ports.json")
+print(nodes_ports)
 
 node_id = None
 algo = None
@@ -17,7 +18,7 @@ transport = None
 
 
 def on_message(msg):
-    msg["hops"] = int(msg.get("hops", 0))
+    msg["ttl"] = int(msg.get("hops", 0))
     if msg.get("type") == "HELLO":
         print(f"[HELLO] Recibido HELLO de {msg.get('from')} (timestamp={msg.get('timestamp')})")
         # Responder con PING si quieres medir latencia
@@ -60,12 +61,12 @@ def on_message(msg):
         print(f"\n[{node_id}] No hay ruta hacia {dest}. Descarto.\n> ", end="")
         return
 
-    if msg["hops"] >= 32:  # TTL
+    if msg["ttl"] >= 32:  # TTL
         print(f"\n[{node_id}] TTL excedido hacia {dest}.\n> ", end="")
         return
 
     next_hop = algo.routing_table[dest]
-    msg["hops"] += 1
+    msg["ttl"] += 1
     try:
         nh_port = nodes_ports[next_hop]
         transport.send("127.0.0.1", nh_port, msg)
@@ -78,6 +79,7 @@ def main():
     global node_id, algo, transport
 
     parser = argparse.ArgumentParser()
+    
     parser.add_argument("--id", required=True, help="Node ID (ej. A)")
     parser.add_argument("--algo", required=True, choices=["dijkstra", "flooding", "linkstate", "dvr"],
                         help="Algoritmo de enrutamiento a usar")
@@ -132,9 +134,24 @@ def main():
         choice = input("> ")
 
         if choice == "1":
+            if not isinstance(algo, Flooding):
+                dest = input("Destino (ej. E): ").strip()
+                if dest not in algo.routing_table:
+                    print(f"No hay ruta hacia {dest}")
+                    continue
+
             payload = input("Mensaje: ").strip()
-            headers = {"msg_id": str(uuid.uuid4())}
-            msg = make_message("DATA", node_id, None, payload, headers=headers, hops=0)
+            msg = make_message(
+                proto=args.algo,
+                mtype="message",
+                src=node_id,
+                dst=dest if not isinstance(algo, Flooding) else None,
+                payload=payload,
+                headers={"msg_id": str(uuid.uuid4())},
+                ttl=32
+            )
+
+
 
             if isinstance(algo, Flooding):
                 for neigh in algo.routing_table["__FLOOD__"]:
