@@ -85,3 +85,6 @@ Nodo F: [DELIVERED to F] Hola F, desde A        # Finalmente llegó el mensaje d
 ```
 
 4. Ahora en teoría, si se elimina el nodo I entonces programa debe de recalcular la tabla con los nodos disponibles y así encotrar la nueva mejor ruta de `A` → `F`:
+
+
+python main.py --id N1 --algo dijkstra --topo topo-sample.txt --names names-ports.json --transport xmpp --jid N1@homelab.fortiguate.com --password 4YNydkHFPcayvlx7$zpKm

@@ -1,7 +1,7 @@
 import argparse
 import uuid
 import time
-from network.transport import TCPTransport
+from network.transport import TCPTransport, XMPPTransport
 from network.protocol import make_message
 from network.topo_loader import load_topology, load_names
 from routing.dijkstra import Dijkstra
@@ -52,40 +52,18 @@ def on_message(msg):
             algo.handle_message(msg, transport, nodes_ports)
             return
 
-    dest = msg.get("to")
-    if dest == node_id:
-        print(f"\n[DELIVERED to {node_id}] {msg.get('payload')}\n> ", end="")
-        return
-
-    if dest not in algo.routing_table:
-        print(f"\n[{node_id}] No hay ruta hacia {dest}. Descarto.\n> ", end="")
-        return
-
-    if msg["ttl"] >= 32:  # TTL
-        print(f"\n[{node_id}] TTL excedido hacia {dest}.\n> ", end="")
-        return
-
-    next_hop = algo.routing_table[dest]
-    msg["ttl"] += 1
-    try:
-        nh_port = nodes_ports[next_hop]
-        transport.send("127.0.0.1", nh_port, msg)
-        print(f"\n[{node_id}] Forward → {next_hop} (dest {dest}, hops={msg['hops']})\n> ", end="")
-    except Exception as e:
-        print(f"\n[{node_id}] Error reenviando a {next_hop}: {e}\n> ", end="")
-
 
 def main():
     global node_id, algo, transport
-
     parser = argparse.ArgumentParser()
-    
     parser.add_argument("--id", required=True, help="Node ID (ej. A)")
-    parser.add_argument("--algo", required=True, choices=["dijkstra", "flooding", "linkstate", "dvr"],
-                        help="Algoritmo de enrutamiento a usar")
+    parser.add_argument("--algo", required=True, choices=["dijkstra", "flooding", "linkstate", "dvr"], help="Algoritmo de enrutamiento a usar")
     parser.add_argument("--topo", required=True, help="Archivo de topología")
     parser.add_argument("--names", required=True, help="Archivo de nombres")
     parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--transport", default="tcp", choices=["tcp", "xmpp"], help="Tipo de transporte: tcp o xmpp")
+    parser.add_argument("--jid", help="JID para XMPP (solo si --transport=xmpp)")
+    parser.add_argument("--password", help="Password para XMPP (solo si --transport=xmpp)")
     args = parser.parse_args()
 
     node_id = args.id
@@ -93,14 +71,18 @@ def main():
     names = load_names(args.names)
     neighbors = topology[node_id]
 
+    # Inicialización de algoritmos: solo Dijkstra recibe la topología global
     if args.algo == "dijkstra":
-        algo = Dijkstra(node_id, neighbors)
+        algo = Dijkstra(node_id, topology)
     elif args.algo == "flooding":
         algo = Flooding(node_id, neighbors)
     elif args.algo == "linkstate":
         algo = LinkState(node_id, neighbors)
     elif args.algo == "dvr":
         algo = DistanceVector(node_id, neighbors)
+    else:
+        print("Algoritmo no soportado.")
+        return
 
     print(f"[INFO] Nodo {node_id} usando algoritmo: {args.algo}")
 
@@ -109,14 +91,25 @@ def main():
         table = algo.compute_routes(algo.lsdb)
     elif args.algo == "dvr":
         table = algo.compute_routes()
-    else:
+    elif args.algo == "dijkstra":
         table = algo.compute_routes(topology)
+    else:
+        table = algo.compute_routes()
     print("[ROUTING TABLE]", table)
 
-    transport = TCPTransport(args.host, nodes_ports[args.id], on_message)
-    transport.start_server()
-
-    print(f"\nNodo {node_id} conectado en {args.host}:{nodes_ports[args.id]}\n")
+    # Inicializar transporte según argumento
+    if args.transport == "tcp":
+        transport = TCPTransport(args.host, nodes_ports[args.id], on_message)
+        transport.start_server()
+        print(f"\nNodo {node_id} conectado en {args.host}:{nodes_ports[args.id]} (TCP)\n")
+    elif args.transport == "xmpp":
+        if not args.jid or not args.password:
+            print("Para XMPP debes especificar --jid y --password")
+            return
+        transport = XMPPTransport(args.jid, args.password, on_message)
+        transport.connect()
+        transport.start_listener()
+        print(f"\nNodo {node_id} conectado como {args.jid} (XMPP)\n")
 
     # Flood inicial de LSA para LinkState
     if args.algo == "linkstate":
