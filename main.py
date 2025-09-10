@@ -1,7 +1,7 @@
 import argparse
 import uuid
 import time
-from network.transport import TCPTransport, XMPPTransport
+from network.transport import TCPTransport, XMPPTransport, RedisTransport
 from network.protocol import make_message
 from network.topo_loader import load_topology, load_names
 from routing.dijkstra import Dijkstra
@@ -61,7 +61,7 @@ def main():
     parser.add_argument("--topo", required=True, help="Archivo de topología")
     parser.add_argument("--names", required=True, help="Archivo de nombres")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--transport", default="tcp", choices=["tcp", "xmpp"], help="Tipo de transporte: tcp o xmpp")
+    parser.add_argument("--transport", default="tcp", choices=["tcp", "xmpp", "redis"], help="Tipo de transporte: tcp o xmpp")
     parser.add_argument("--jid", help="JID para XMPP (solo si --transport=xmpp)")
     parser.add_argument("--password", help="Password para XMPP (solo si --transport=xmpp)")
     args = parser.parse_args()
@@ -110,6 +110,10 @@ def main():
         transport.connect()
         transport.start_listener()
         print(f"\nNodo {node_id} conectado como {args.jid} (XMPP)\n")
+    elif args.transport == "redis":
+        transport = RedisTransport(node_id, on_message)
+        transport.start_server()
+        print(f"\nNodo {node_id} conectado a Redis como sec30.grupo0.{node_id}\n")
 
     # Flood inicial de LSA para LinkState
     if args.algo == "linkstate":
@@ -127,67 +131,44 @@ def main():
         choice = input("> ")
 
         if choice == "1":
-            if not isinstance(algo, Flooding):
-                dest = input("Destino (ej. E): ").strip()
-                if dest not in algo.routing_table:
-                    print(f"No hay ruta hacia {dest}")
-                    continue
-
             payload = input("Mensaje: ").strip()
-            msg = make_message(
-                proto=args.algo,
-                mtype="message",
-                src=node_id,
-                dst=dest if not isinstance(algo, Flooding) else None,
-                payload=payload,
-                headers={"msg_id": str(uuid.uuid4())},
-                ttl=32
-            )
-
-
 
             if isinstance(algo, Flooding):
+                msg = make_message(
+                    proto=args.algo,
+                    mtype="message",
+                    src=node_id,
+                    dst=None,
+                    payload=payload,
+                    headers={"msg_id": str(uuid.uuid4())},
+                    ttl=32
+                )
                 for neigh in algo.routing_table["__FLOOD__"]:
                     fwd = dict(msg)
-                    fwd["last_hop"] = node_id  # el origen se marca como último salto
+                    fwd["last_hop"] = node_id
                     try:
                         nh_port = nodes_ports[neigh]
                         transport.send("127.0.0.1", nh_port, fwd)
                         print(f"[{node_id}] Flood inicial → {neigh}")
                     except Exception as e:
                         print("Error enviando:", e)
-            elif isinstance(algo, LinkState):
-                dest = input("Destino (ej. E): ").strip()
-                if dest not in algo.routing_table:
-                    print(f"No hay ruta hacia {dest}")
-                    continue
-                msg["to"] = dest
-                next_hop = algo.routing_table[dest]
-                try:
-                    nh_port = nodes_ports[next_hop]
-                    transport.send("127.0.0.1", nh_port, msg)
-                    print(f"[{node_id}] Enviado a {dest} via next hop {next_hop}")
-                except Exception as e:
-                    print("Error enviando:", e)
-            elif isinstance(algo, DistanceVector):
-                dest = input("Destino (ej. E): ").strip()
-                if dest not in algo.routing_table:
-                    print(f"No hay ruta hacia {dest}")
-                    continue
-                msg["to"] = dest
-                next_hop = algo.routing_table[dest]
-                try:
-                    nh_port = nodes_ports[next_hop]
-                    transport.send("127.0.0.1", nh_port, msg)
-                    print(f"[{node_id}] Enviado a {dest} via next hop {next_hop}")
-                except Exception as e:
-                    print("Error enviando:", e)
+
             else:
                 dest = input("Destino (ej. E): ").strip()
                 if dest not in algo.routing_table:
                     print(f"No hay ruta hacia {dest}")
                     continue
-                msg["to"] = dest
+
+                msg = make_message(
+                    proto=args.algo,
+                    mtype="message",
+                    src=node_id,
+                    dst=dest,
+                    payload=payload,
+                    headers={"msg_id": str(uuid.uuid4())},
+                    ttl=32
+                )
+
                 next_hop = algo.routing_table[dest]
                 try:
                     nh_port = nodes_ports[next_hop]
@@ -195,6 +176,7 @@ def main():
                     print(f"[{node_id}] Enviado a {dest} via next hop {next_hop}")
                 except Exception as e:
                     print("Error enviando:", e)
+
 
         elif choice == "2":
             print("Escuchando mensajes... (ENTER para volver al menú)")
