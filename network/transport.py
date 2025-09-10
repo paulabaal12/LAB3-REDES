@@ -220,3 +220,104 @@ class XMPPTransport:
         self._loop_thread = threading.Thread(target=_loop_runner, daemon=True)
         self._loop_thread.start()
         time.sleep(0.1) 
+
+
+        time.sleep(0.1)
+
+    def disconnect(self):
+        if self._has_process:
+            try:
+                self.xmpp.disconnect()
+                print("[XMPP] Legacy disconnect() solicitado")
+            except Exception as e:
+                print(f"[XMPP] Error en legacy disconnect(): {e}")
+            return
+
+        if self._loop and self._running:
+            def _do_disc():
+                try:
+                    self.xmpp.disconnect()
+                except Exception as e:
+                    print(f"[XMPP] Error en disconnect(): {e}")
+
+            self._loop.call_soon_threadsafe(_do_disc)
+        else:
+            print("[XMPP] No hay loop activo para desconectar")
+
+
+
+import asyncio
+import redis.asyncio as redis
+import json
+import threading
+
+class RedisTransport:
+    def __init__(self, node_id, on_message, host="homelab.fortiguate.com", port=16379 , password="4YNydkHFPcayvlx7$zpKm"):
+        self.node_id = node_id
+        self.on_message = on_message
+        self.host = host
+        self.port = port
+        self.password = password
+
+        self.redis = redis.Redis(host=self.host, port=self.port, password=self.password)
+        self._loop = None
+        self._thread = None
+        self._running = False
+
+    async def _reader(self, pubsub):
+        """Coroutine que escucha el canal de este nodo"""
+        while self._running:
+            try:
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if message is not None:
+                    data = message["data"]
+                    try:
+                        msg = json.loads(data.decode() if isinstance(data, bytes) else data)
+                        self.on_message(msg)
+                    except Exception as e:
+                        print(f"[Redis] Error parsing message: {e}")
+            except Exception as e:
+                print(f"[Redis] Reader error: {e}")
+                await asyncio.sleep(1)
+
+    async def _start_async(self):
+        """Loop asíncrono que mantiene la suscripción activa"""
+        try:
+            async with self.redis.pubsub() as pubsub:
+                await pubsub.subscribe(f"sec30.grupo0.{self.node_id}")
+                print(f"[Redis] Subscribed to sec30.grupo0.{self.node_id}")
+                await self._reader(pubsub)
+        except Exception as e:
+            print(f"[Redis] Error in _start_async: {e}")
+
+    def start_server(self):
+        """Inicia el loop asíncrono en un hilo aparte"""
+        if self._running:
+            print("[Redis] Listener already running")
+            return
+
+        self._running = True
+
+        def _run_loop():
+            self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
+            self._loop.run_until_complete(self._start_async())
+
+        self._thread = threading.Thread(target=_run_loop, daemon=True)
+        self._thread.start()
+        print(f"[Redis] Listener started for node {self.node_id}")
+
+    def send(self, target_node, message):
+        """Publica un mensaje en el canal del destino"""
+        try:
+            msg_str = json.dumps(message)
+            asyncio.run(self.redis.publish(f"sec30.grupo0.{target_node}", msg_str))
+            print(f"[Redis] {message.get('proto')} {message.get('type')} {message.get('from')} -> {target_node}")
+        except Exception as e:
+            print(f"[Redis] Error sending to {target_node}: {e}")
+
+    def disconnect(self):
+        self._running = False
+        if self._loop:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        print("[Redis] Transport disconnected")
