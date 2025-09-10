@@ -252,19 +252,18 @@ import json
 import threading
 
 class RedisTransport:
-    def __init__(self, node_id, on_message, neighbor_groups=None, my_group=9, host="homelab.fortiguate.com", port=16379 , password="4YNydkHFPcayvlx7$zpKm"):
+    def __init__(self, node_id, on_message, host="homelab.fortiguate.com", port=16379, password="4YNydkHFPcayvlx7$zpKm", neighbor_groups=None, my_group=9):
         self.node_id = node_id
         self.on_message = on_message
         self.host = host
         self.port = port
         self.password = password
-        self.neighbor_groups = neighbor_groups or {}
-        self.my_group = my_group
-
         self.redis = redis.Redis(host=self.host, port=self.port, password=self.password)
         self._loop = None
         self._thread = None
         self._running = False
+        self.neighbor_groups = neighbor_groups or {}
+        self.my_group = my_group
 
     async def _reader(self, pubsub):
         """Coroutine que escucha el canal de este nodo"""
@@ -286,13 +285,15 @@ class RedisTransport:
         """Loop asíncrono que mantiene la suscripción activa"""
         try:
             async with self.redis.pubsub() as pubsub:
-                # Suscribirse a canal propio y de vecinos (con grupo correcto)
-                channels = [f"sec30.grupo{self.my_group}.{self.node_id}"]
+                # Suscribirse a los canales de todos los vecinos
                 for nbr, group in self.neighbor_groups.items():
-                    if nbr != self.node_id:
-                        channels.append(f"sec30.grupo{group}.{nbr}")
-                await pubsub.subscribe(*channels)
-                print(f"[Redis] Subscribed to: {', '.join(channels)}")
+                    canal = f"sec30.grupo{group}.{nbr}"
+                    await pubsub.subscribe(canal)
+                    print(f"[Redis] Subscribed to {canal}")
+                # También suscribirse a tu propio canal
+                my_canal = f"sec30.grupo{self.my_group}.{self.node_id}"
+                await pubsub.subscribe(my_canal)
+                print(f"[Redis] Subscribed to own channel {my_canal}")
                 await self._reader(pubsub)
         except Exception as e:
             print(f"[Redis] Error in _start_async: {e}")
@@ -322,6 +323,7 @@ class RedisTransport:
             import threading
             group = group if group is not None else self.neighbor_groups.get(target_node, 9)
             channel = f"sec30.grupo{group}.{target_node}"
+            print(f"[DEBUG][{self.node_id}] Enviando a {target_node} (grupo {group}) por canal: {channel}")
             # Si estamos en el hilo del loop de Redis, usar create_task
             if self._loop and self._loop.is_running():
                 if threading.current_thread() == self._thread:

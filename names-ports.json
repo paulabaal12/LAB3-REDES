@@ -1,16 +1,16 @@
 {
   "type": "names",
   "config": {
-    "N1": "N1@homelab.fortiguate.com",
-    "N2": "N2@homelab.fortiguate.com",
-    "N3": "N3@homelab.fortiguate.com",
-    "N4": "N4@homelab.fortiguate.com",
-    "N5": "N5@homelab.fortiguate.com",
-    "N6": "N6@homelab.fortiguate.com",
-    "N7": "N7@homelab.fortiguate.com",
-    "N8": "N8@homelab.fortiguate.com",
-    "N9": "N9@homelab.fortiguate.com",
-    "N10": "N10@homelab.fortiguate.com",
-    "N11": "N11@homelab.fortiguate.com"
+    "nodo1": "nodo1@homelab.fortiguate.com",
+    "nodo2": "nodo2@homelab.fortiguate.com",
+    "nodo3": "nodo3@homelab.fortiguate.com",
+    "nodo4": "nodo4@homelab.fortiguate.com",
+    "nodo5": "nodo5@homelab.fortiguate.com",
+    "nodo6": "nodo6@homelab.fortiguate.com",
+    "nodo7": "nodo7@homelab.fortiguate.com",
+    "nodo8": "nodo8@homelab.fortiguate.com",
+    "nodo9": "nodo9@homelab.fortiguate.com",
+    "nodo10": "nodo10@homelab.fortiguate.com",
+    "nodo11": "nodo11@homelab.fortiguate.com"
   }
 }

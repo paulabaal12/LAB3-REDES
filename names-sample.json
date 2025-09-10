@@ -1,14 +1,14 @@
 {
   "type": "names",
   "config": {
-    "A": "a@alumchat.lol",
-    "B": "b@alumchat.lol",
-    "C": "c@alumchat.lol",
-    "D": "d@alumchat.lol",
-    "E": "e@alumchat.lol",
-    "F": "f@alumchat.lol",
-    "G": "g@alumchat.lol",
-    "H": "h@alumchat.lol",
-    "I": "i@alumchat.lol"
+    "nodo1": "a@alumchat.lol",
+    "nodo2": "b@alumchat.lol",
+    "nodo3": "c@alumchat.lol",
+    "nodo4": "d@alumchat.lol",
+    "nodo5": "e@alumchat.lol",
+    "nodo6": "f@alumchat.lol",
+    "nodo7": "g@alumchat.lol",
+    "nodo8": "h@alumchat.lol",
+    "nodo9": "i@alumchat.lol"
   }
 }

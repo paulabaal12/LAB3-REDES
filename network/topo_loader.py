@@ -23,6 +23,14 @@ def load_topology(file_path):
       ...
     }
     """
+    def normalize_node_name(name):
+        name = name.strip()
+        if name.lower().startswith('nodo'):
+            return name.lower()
+        if name.upper().startswith('N') and name[1:].isdigit():
+            return f"nodo{int(name[1:])}"
+        return name
+
     topology = {}
     with open(file_path) as f:
         raw = f.read().strip()
@@ -35,13 +43,16 @@ def load_topology(file_path):
         n1, n2 = nodes.split("-")
         w = int(weight)
 
+        n1_norm = normalize_node_name(n1)
+        n2_norm = normalize_node_name(n2)
+
         # añadir aristas en ambas direcciones
-        if n1 not in topology:
-            topology[n1] = {}
-        if n2 not in topology:
-            topology[n2] = {}
-        topology[n1][n2] = w
-        topology[n2][n1] = w
+        if n1_norm not in topology:
+            topology[n1_norm] = {}
+        if n2_norm not in topology:
+            topology[n2_norm] = {}
+        topology[n1_norm][n2_norm] = w
+        topology[n2_norm][n1_norm] = w
 
     return topology
 

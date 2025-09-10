@@ -10,6 +10,11 @@ from routing.flooding import Flooding
 from routing.link_state import LinkState
 from routing.dvr import DistanceVector
 
+
+# Cargar grupos globalmente para que esté disponible en on_message
+with open("groups.json") as f:
+    groups = json.load(f)
+
 nodes_ports = load_names("names-ports.json")
 print(nodes_ports)
 
@@ -19,6 +24,7 @@ transport = None
 
 
 def on_message(msg):
+    global groups
     msg["ttl"] = int(msg.get("hops", 0))
     if msg.get("type") == "HELLO":
         print(f"[HELLO] Recibido HELLO de {msg.get('from')} (timestamp={msg.get('timestamp')})")
@@ -30,9 +36,13 @@ def on_message(msg):
             reply["to"] = msg["from"]
             reply["payload"] = "PING"
             reply["timestamp_reply"] = time.time()
-            nh_port = nodes_ports.get(msg["from"], None)
-            if nh_port:
-                transport.send("127.0.0.1", nh_port, reply)
+            if transport.__class__.__name__ == "RedisTransport":
+                group = groups.get(msg["from"], 9)
+                transport.send(msg["from"], reply, group=group)
+            else:
+                nh_port = nodes_ports.get(msg["from"], None)
+                if nh_port:
+                    transport.send("127.0.0.1", nh_port, reply)
         return
     if msg.get("type") == "PING":
         print(f"[PING] Recibido PING de {msg.get('from')} (timestamp={msg.get('timestamp_reply')})")
@@ -55,6 +65,13 @@ def on_message(msg):
 
 
 def main():
+    def normalize_node_name(name):
+        name = name.strip()
+        if name.lower().startswith('nodo'):
+            return name.lower()
+        if name.upper().startswith('N') and name[1:].isdigit():
+            return f"nodo{int(name[1:])}"
+        return name
     # Leer grupos
     with open("groups.json") as f:
         groups = json.load(f)
@@ -70,7 +87,7 @@ def main():
     parser.add_argument("--password", help="Password para XMPP (solo si --transport=xmpp)")
     args = parser.parse_args()
 
-    node_id = args.id
+    node_id = normalize_node_name(args.id)
     topology = load_topology(args.topo)
     names = load_names(args.names)
     neighbors = topology[node_id]
@@ -153,18 +170,20 @@ def main():
                     ttl=32
                 )
                 for neigh in algo.routing_table["__FLOOD__"]:
+                    neigh_norm = normalize_node_name(neigh)
                     fwd = dict(msg)
                     fwd["last_hop"] = node_id
                     try:
-                        nh_port = nodes_ports[neigh]
+                        nh_port = nodes_ports[neigh_norm]
                         transport.send("127.0.0.1", nh_port, fwd)
-                        print(f"[{node_id}] Flood inicial → {neigh}")
+                        print(f"[{node_id}] Flood inicial → {neigh_norm}")
                     except Exception as e:
                         print("Error enviando:", e)
 
             else:
                 dest = input("Destino (ej. E): ").strip()
-                if dest not in algo.routing_table:
+                dest_norm = normalize_node_name(dest)
+                if dest_norm not in algo.routing_table:
                     print(f"No hay ruta hacia {dest}")
                     continue
 
@@ -172,23 +191,28 @@ def main():
                     proto=args.algo,
                     mtype="message",
                     src=node_id,
-                    dst=dest,
+                    dst=dest_norm,
                     payload=payload,
                     headers={"msg_id": str(uuid.uuid4())},
                     ttl=32
                 )
 
-                next_hop = algo.routing_table[dest]
+                next_hop = algo.routing_table[dest_norm]
+                next_hop_norm = normalize_node_name(next_hop)
                 try:
                     # Detecta si es RedisTransport
                     if transport.__class__.__name__ == "RedisTransport":
                         # Usa el grupo correcto para el next_hop
-                        group = groups.get(next_hop, 9)
-                        transport.send(next_hop, msg, group=group)
+                        group = groups.get(next_hop_norm, 9)
+                        transport.send(next_hop_norm, msg, group=group)
                     else:
-                        nh_port = nodes_ports[next_hop]
-                        transport.send("127.0.0.1", nh_port, msg)
-                    print(f"[{node_id}] Enviado a {dest} via next hop {next_hop}")
+                        nh_port = nodes_ports[next_hop_norm]
+                        if transport.__class__.__name__ == "RedisTransport":
+                            group = groups.get(next_hop_norm, 9)
+                            transport.send(next_hop_norm, msg, group=group)
+                        else:
+                            transport.send("127.0.0.1", nh_port, msg)
+                    print(f"[{node_id}] Enviado a {dest_norm} via next hop {next_hop_norm}")
                 except Exception as e:
                     print("Error enviando:", e)
 
@@ -202,42 +226,48 @@ def main():
             break
         elif choice == "4":
             dest = input("Vecino destino (ej. B): ").strip()
-            if dest not in neighbors:
+            dest_norm = normalize_node_name(dest)
+            if dest_norm not in neighbors:
                 print("No es vecino directo.")
                 continue
             hello_msg = {
                 "proto": "hello",
                 "type": "HELLO",
                 "from": node_id,
-                "to": dest,
+                "to": dest_norm,
                 "payload": "HELLO",
                 "timestamp": time.time(),
             }
-            nh_port = nodes_ports[dest]
-            transport.send("127.0.0.1", nh_port, hello_msg)
-            print(f"[HELLO] Enviado HELLO a {dest}")
+            if transport.__class__.__name__ == "RedisTransport":
+                group = groups.get(dest_norm, 9)
+                transport.send(dest_norm, hello_msg, group=group)
+            else:
+                nh_port = nodes_ports[dest_norm]
+                transport.send("127.0.0.1", nh_port, hello_msg)
+            print(f"[HELLO] Enviado HELLO a {dest_norm}")
         elif choice == "5":
             dest = input("Vecino destino (ej. B): ").strip()
-            if dest not in neighbors:
+            dest_norm = normalize_node_name(dest)
+            if dest_norm not in neighbors:
                 print("No es vecino directo.")
                 continue
             table_msg = {
                 "proto": "table",
                 "type": "TABLE",
                 "from": node_id,
-                "to": dest,
+                "to": dest_norm,
                 "payload": "TABLE",
                 "table": getattr(algo, 'routing_table', {}),
                 "timestamp": time.time(),
             }
             try:
                 if transport.__class__.__name__ == "RedisTransport":
-                    group = groups.get(dest, 9)
-                    transport.send(dest, table_msg, group=group)
+                    group = groups.get(dest_norm, 9)
+                    transport.send(dest_norm, table_msg, group=group)
                 else:
-                    nh_port = nodes_ports[dest]
+                    nh_port = nodes_ports[dest_norm]
                     transport.send("127.0.0.1", nh_port, table_msg)
-                print(f"[INFO] Enviada tabla de ruteo a {dest}")
+                print(f"[INFO] Enviada tabla de ruteo a {dest_norm}")
             except Exception as e:
                 print(f"Error enviando tabla: {e}")
         else:
