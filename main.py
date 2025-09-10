@@ -24,6 +24,8 @@ transport = None
 
 
 def on_message(msg):
+    # Print genérico para cualquier mensaje recibido
+    print(f"[RECEIVED][{node_id}] Mensaje recibido: {msg}")
     global groups
     msg["ttl"] = int(msg.get("hops", 0))
     if msg.get("type") == "HELLO":
