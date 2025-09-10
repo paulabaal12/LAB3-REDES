@@ -50,20 +50,18 @@ class XMPPBot(slixmpp.ClientXMPP):
     def __init__(self, jid, password, on_message_callback):
         super().__init__(jid, password)
         self.on_message_callback = on_message_callback
+        self.add_event_handler("session_start", self._on_start)
+        self.add_event_handler("message", self._on_message)
 
-        # Handlers
-        self.add_event_handler("session_start", self.start)
-        self.add_event_handler("message", self.message)
-
-    async def start(self, event):
+    async def _on_start(self, event):
         try:
             self.send_presence()
             await self.get_roster()
-            print("[XMPP] Session started, presence sent and roster fetched")
+            print("[XMPP] Session started")
         except Exception as e:
             print(f"[XMPP] Error in session_start: {e}")
 
-    def message(self, msg):
+    def _on_message(self, msg):
         if msg['type'] in ('chat', 'normal'):
             try:
                 data = _json.loads(str(msg['body']))
@@ -72,26 +70,37 @@ class XMPPBot(slixmpp.ClientXMPP):
                 print(f"[XMPP] Error al procesar mensaje: {e}")
 
 
+# =========================
+# XMPP TRANSPORT
+# =========================
 class XMPPTransport:
 
-    def __init__(self, jid, password, on_message_callback,
-        server='homelab.fortiguate.com', port=16379):
+    def __init__(self, jid, password, on_message_callback,server='homelab.fortiguate.com', port=16379):
         self.jid = jid
         self.password = password
         self.on_message_callback = on_message_callback
         self.server = server
         self.port = port
 
-        self.xmpp = XMPPBot(jid, password, on_message_callback)
+        # Detecta si existe .process() a nivel de clase (legacy)
+        self._legacy_mode = hasattr(slixmpp.ClientXMPP, 'process')
 
-        self._loop_thread = None
+        # Estado moderno
         self._loop = None
+        self._loop_thread = None
         self._running = False
-
-        self._has_process = hasattr(self.xmpp, 'process')
+        self._xmpp_ready = threading.Event()
+        self.xmpp = None  
 
     def connect(self):
+        """En moderno, la conexión real se agenda en start_listener(). En legacy, también."""
         pass
+
+    def start_listener(self):
+        if self._legacy_mode:
+            self._start_legacy()
+        else:
+            self._start_modern()
 
     def send(self, to_jid, message):
         try:
@@ -100,7 +109,7 @@ class XMPPTransport:
             print(f"[XMPP] Error serializando mensaje: {e}")
             return
 
-        if self._has_process:
+        if self._legacy_mode:
             try:
                 self.xmpp.send_message(mto=to_jid, mbody=msg_str, mtype='chat')
                 print(f"[XMPP] Enviado (legacy) -> {to_jid}")
@@ -108,57 +117,85 @@ class XMPPTransport:
                 print(f"[XMPP] Error enviando mensaje (legacy): {e}")
             return
 
-        if self._loop and self._running:
+        if not self._xmpp_ready.wait(timeout=5):
+            print("[XMPP] Bot no está listo aún; ¿llamaste start_listener()?")
+            return
+
+        if self._loop and self._running and self.xmpp:
             def _do_send():
                 try:
                     self.xmpp.send_message(mto=to_jid, mbody=msg_str, mtype='chat')
                     print(f"[XMPP] Enviado -> {to_jid}")
                 except Exception as e:
-                    print(f"[XMPP] Error enviando mensaje (asyncio): {e}")
-
-            # Programar dentro del loop
+                    print(f"[XMPP] Error enviando (asyncio): {e}")
             self._loop.call_soon_threadsafe(_do_send)
         else:
-            print("[XMPP] No hay loop activo; ¿llamaste start_listener()?")
+            print("[XMPP] No hay loop activo")
 
-    def start_listener(self):
-        if self._has_process:
-            # ========== MODO LEGACY ==========
-            def _legacy_runner():
-                try:
-                    # Conexión (bloquea internamente al procesar)
-                    ok = self.xmpp.connect((self.server, self.port))
-                    if not ok:
-                        print(f"[XMPP] Legacy connect() falló contra {self.server}:{self.port}")
-                        return
-                    print("[XMPP] Legacy conectado; iniciando process(forever=True)")
-                    self.xmpp.process(forever=True)
-                except Exception as e:
-                    print(f"[XMPP] Error en legacy runner: {e}")
-                finally:
+    def disconnect(self):
+        if self._legacy_mode:
+            try:
+                if self.xmpp:
                     self.xmpp.disconnect()
-
-            t = threading.Thread(target=_legacy_runner, daemon=True)
-            t.start()
+                    print("[XMPP] Legacy disconnect() solicitado")
+            except Exception as e:
+                print(f"[XMPP] Error en legacy disconnect(): {e}")
             return
 
-        # ========== MODO MODERNO ==========
+        if self._loop and self._running and self.xmpp:
+            def _do_disc():
+                try:
+                    self.xmpp.disconnect()
+                except Exception as e:
+                    print(f"[XMPP] Error en disconnect(): {e}")
+            self._loop.call_soon_threadsafe(_do_disc)
+        else:
+            print("[XMPP] No hay loop activo para desconectar")
+
+    def _start_legacy(self):
+        self.xmpp = XMPPBot(self.jid, self.password, self.on_message_callback)
+
+        def _legacy_runner():
+            try:
+                ok = self.xmpp.connect((self.server, self.port))
+                if not ok:
+                    print(f"[XMPP] Legacy connect() falló contra {self.server}:{self.port}")
+                    return
+                print("[XMPP] Legacy conectado; iniciando process(forever=True)")
+                self.xmpp.process(forever=True)
+            except Exception as e:
+                print(f"[XMPP] Error en legacy runner: {e}")
+            finally:
+                self.xmpp.disconnect()
+
+        t = threading.Thread(target=_legacy_runner, daemon=True)
+        t.start()
+
+    def _start_modern(self):
         if self._running:
             print("[XMPP] Listener ya estaba iniciado")
             return
 
         self._running = True
+        self._xmpp_ready.clear()
 
         def _loop_runner():
             try:
-                self._loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(self._loop)
+                import sys
+                if sys.platform.startswith("win"):
+                    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+            except Exception:
+                pass
 
-                # Agenda la conexión; connect() no bloquea
+            self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
+
+            try:
+                self.xmpp = XMPPBot(self.jid, self.password, self.on_message_callback)
                 self.xmpp.connect(host=self.server, port=self.port)
-
-                # Corre hasta que se desconecte
+                self._xmpp_ready.set()
                 print(f"[XMPP] Async loop corriendo (host={self.server}, port={self.port})")
+                # Esperar a que se desconecte
                 self._loop.run_until_complete(self.xmpp.disconnected)
                 print("[XMPP] Señal de desconexión recibida")
             except Exception as e:
@@ -176,29 +213,10 @@ class XMPPTransport:
                     self._loop.close()
                     self._loop = None
                     self._running = False
+                    self.xmpp = None
+                    self._xmpp_ready.clear()
                     print("[XMPP] Async loop cerrado")
 
         self._loop_thread = threading.Thread(target=_loop_runner, daemon=True)
         self._loop_thread.start()
-
-        time.sleep(0.1)
-
-    def disconnect(self):
-        if self._has_process:
-            try:
-                self.xmpp.disconnect()
-                print("[XMPP] Legacy disconnect() solicitado")
-            except Exception as e:
-                print(f"[XMPP] Error en legacy disconnect(): {e}")
-            return
-
-        if self._loop and self._running:
-            def _do_disc():
-                try:
-                    self.xmpp.disconnect()
-                except Exception as e:
-                    print(f"[XMPP] Error en disconnect(): {e}")
-
-            self._loop.call_soon_threadsafe(_do_disc)
-        else:
-            print("[XMPP] No hay loop activo para desconectar")
+        time.sleep(0.1) 
