@@ -252,12 +252,14 @@ import json
 import threading
 
 class RedisTransport:
-    def __init__(self, node_id, on_message, host="homelab.fortiguate.com", port=16379 , password="4YNydkHFPcayvlx7$zpKm"):
+    def __init__(self, node_id, on_message, neighbor_groups=None, my_group=9, host="homelab.fortiguate.com", port=16379 , password="4YNydkHFPcayvlx7$zpKm"):
         self.node_id = node_id
         self.on_message = on_message
         self.host = host
         self.port = port
         self.password = password
+        self.neighbor_groups = neighbor_groups or {}
+        self.my_group = my_group
 
         self.redis = redis.Redis(host=self.host, port=self.port, password=self.password)
         self._loop = None
@@ -284,8 +286,13 @@ class RedisTransport:
         """Loop asíncrono que mantiene la suscripción activa"""
         try:
             async with self.redis.pubsub() as pubsub:
-                await pubsub.subscribe(f"sec30.grupo0.{self.node_id}")
-                print(f"[Redis] Subscribed to sec30.grupo0.{self.node_id}")
+                # Suscribirse a canal propio y de vecinos (con grupo correcto)
+                channels = [f"sec30.grupo{self.my_group}.{self.node_id}"]
+                for nbr, group in self.neighbor_groups.items():
+                    if nbr != self.node_id:
+                        channels.append(f"sec30.grupo{group}.{nbr}")
+                await pubsub.subscribe(*channels)
+                print(f"[Redis] Subscribed to: {', '.join(channels)}")
                 await self._reader(pubsub)
         except Exception as e:
             print(f"[Redis] Error in _start_async: {e}")
@@ -307,12 +314,29 @@ class RedisTransport:
         self._thread.start()
         print(f"[Redis] Listener started for node {self.node_id}")
 
-    def send(self, target_node, message):
-        """Publica un mensaje en el canal del destino"""
+    def send(self, target_node, message, group=None):
+        """Publica un mensaje en el canal del destino, usando el grupo correcto"""
         try:
             msg_str = json.dumps(message)
-            asyncio.run(self.redis.publish(f"sec30.grupo0.{target_node}", msg_str))
-            print(f"[Redis] {message.get('proto')} {message.get('type')} {message.get('from')} -> {target_node}")
+            import asyncio
+            import threading
+            group = group if group is not None else self.neighbor_groups.get(target_node, 9)
+            channel = f"sec30.grupo{group}.{target_node}"
+            # Si estamos en el hilo del loop de Redis, usar create_task
+            if self._loop and self._loop.is_running():
+                if threading.current_thread() == self._thread:
+                    # Mismo hilo: podemos usar create_task
+                    asyncio.create_task(self.redis.publish(channel, msg_str))
+                else:
+                    # Otro hilo: usar run_coroutine_threadsafe
+                    fut = asyncio.run_coroutine_threadsafe(
+                        self.redis.publish(channel, msg_str),
+                        self._loop
+                    )
+                    fut.result()  # Espera a que termine y propaga excepciones
+            else:
+                asyncio.run(self.redis.publish(channel, msg_str))
+            print(f"[Redis] {message.get('proto')} {message.get('type')} {message.get('from')} -> {target_node} (canal {channel})")
         except Exception as e:
             print(f"[Redis] Error sending to {target_node}: {e}")
 

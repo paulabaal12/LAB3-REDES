@@ -3,6 +3,11 @@ from .base import RoutingAlgorithm
 
 class Dijkstra(RoutingAlgorithm):
     def compute_routes(self, topology):
+        # Asegura que todos los nodos vecinos estén como claves
+        for u in list(topology.keys()):
+            for v in topology[u]:
+                if v not in topology:
+                    topology[v] = {}
         dist = {node: float("inf") for node in topology}
         prev = {node: None for node in topology}
         dist[self.node_id] = 0

@@ -1,3 +1,4 @@
+import json
 import argparse
 import uuid
 import time
@@ -54,6 +55,9 @@ def on_message(msg):
 
 
 def main():
+    # Leer grupos
+    with open("groups.json") as f:
+        groups = json.load(f)
     global node_id, algo, transport
     parser = argparse.ArgumentParser()
     parser.add_argument("--id", required=True, help="Node ID (ej. A)")
@@ -88,10 +92,12 @@ def main():
 
     print("[INFO] Calculando tabla de enrutamiento...")
     if args.algo == "linkstate":
-        table = algo.compute_routes(algo.lsdb)
+        table = algo.compute_routes(algo.topology)
     elif args.algo == "dvr":
         table = algo.compute_routes()
     elif args.algo == "dijkstra":
+        table = algo.compute_routes(topology)
+    elif args.algo == "flooding":
         table = algo.compute_routes(topology)
     else:
         table = algo.compute_routes()
@@ -111,9 +117,12 @@ def main():
         transport.start_listener()
         print(f"\nNodo {node_id} conectado como {args.jid} (XMPP)\n")
     elif args.transport == "redis":
-        transport = RedisTransport(node_id, on_message)
+        # Diccionario vecino:grupo para suscripción y envío
+        neighbor_groups = {nbr: groups.get(nbr, 9) for nbr in neighbors.keys()}
+        my_group = groups.get(node_id, 9)
+        transport = RedisTransport(node_id, on_message, neighbor_groups=neighbor_groups, my_group=my_group)
         transport.start_server()
-        print(f"\nNodo {node_id} conectado a Redis como sec30.grupo0.{node_id}\n")
+        print(f"\nNodo {node_id} conectado a Redis como sec30.grupo{my_group}.{node_id}\n (suscrito a vecinos: {neighbor_groups})\n")
 
     # Flood inicial de LSA para LinkState
     if args.algo == "linkstate":
@@ -171,8 +180,14 @@ def main():
 
                 next_hop = algo.routing_table[dest]
                 try:
-                    nh_port = nodes_ports[next_hop]
-                    transport.send("127.0.0.1", nh_port, msg)
+                    # Detecta si es RedisTransport
+                    if transport.__class__.__name__ == "RedisTransport":
+                        # Usa el grupo correcto para el next_hop
+                        group = groups.get(next_hop, 9)
+                        transport.send(next_hop, msg, group=group)
+                    else:
+                        nh_port = nodes_ports[next_hop]
+                        transport.send("127.0.0.1", nh_port, msg)
                     print(f"[{node_id}] Enviado a {dest} via next hop {next_hop}")
                 except Exception as e:
                     print("Error enviando:", e)
@@ -215,9 +230,16 @@ def main():
                 "table": getattr(algo, 'routing_table', {}),
                 "timestamp": time.time(),
             }
-            nh_port = nodes_ports[dest]
-            transport.send("127.0.0.1", nh_port, table_msg)
-            print(f"[INFO] Enviada tabla de ruteo a {dest}")
+            try:
+                if transport.__class__.__name__ == "RedisTransport":
+                    group = groups.get(dest, 9)
+                    transport.send(dest, table_msg, group=group)
+                else:
+                    nh_port = nodes_ports[dest]
+                    transport.send("127.0.0.1", nh_port, table_msg)
+                print(f"[INFO] Enviada tabla de ruteo a {dest}")
+            except Exception as e:
+                print(f"Error enviando tabla: {e}")
         else:
             print("Opción inválida")
 
