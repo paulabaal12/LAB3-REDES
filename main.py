@@ -25,43 +25,67 @@ transport = None
 
 def on_message(msg):
     global groups
-    msg["ttl"] = int(msg.get("hops", 0))
-    if msg.get("type") == "HELLO":
-        print(f"[HELLO] Recibido HELLO de {msg.get('from')} (timestamp={msg.get('timestamp')})")
-        # Responder con PING si quieres medir latencia
-        if msg.get("payload") == "HELLO":
-            reply = dict(msg)
-            reply["type"] = "PING"
-            reply["from"] = node_id
-            reply["to"] = msg["from"]
-            reply["payload"] = "PING"
-            reply["timestamp_reply"] = time.time()
-            if transport.__class__.__name__ == "RedisTransport":
-                group = groups.get(msg["from"], 9)
-                transport.send(msg["from"], reply, group=group)
-            else:
-                nh_port = nodes_ports.get(msg["from"], None)
-                if nh_port:
-                    transport.send("127.0.0.1", nh_port, reply)
-        return
-    if msg.get("type") == "PING":
-        print(f"[PING] Recibido PING de {msg.get('from')} (timestamp={msg.get('timestamp_reply')})")
-        return
-    if msg.get("type") == "TABLE":
-        print(f"[INFO] Recibida tabla de ruteo de {msg.get('from')}: {msg.get('table')}")
-        return
+    print(f"Tipo antes: {type(msg)}")
+    print(msg)
+    try:
+        msg = json.loads(msg)
+    except Exception as e:
+        print(f"Error decodificando JSON: {e}")
+        return  
+    if hasattr(msg, 'get'):
+        msg["ttl"] = int(msg.get("hops", 0))
+    print(f"Tipo después: {type(msg)}")
+    
+    print(f"Mensaje recibido es variable de tipo {type(msg)}")
+
+    if hasattr(msg, 'get'):
+        if msg.get("type") == "MESSAGE":
+            print(f"\n[{node_id}] Recibido mensaje: '{msg.get('payload')}' de {msg.get('from')} (ttl={msg.get('ttl')})\n> ", end="")
+            return
+
+        if msg.get("type") == "HELLO" or msg.get("type") == "hello":
+            print(f"[HELLO] Recibido HELLO de {msg.get('from')} (hops={msg.get('hops')})")
+            # Responder con PING si quieres medir latencia
+            if msg.get("payload") == "HELLO":
+                reply = dict(msg)
+                reply["type"] = "PING"
+                reply["from"] = node_id
+                reply["to"] = msg["from"]
+                reply["payload"] = "PING"
+                reply["timestamp_reply"] = time.time()
+                if transport.__class__.__name__ == "RedisTransport":
+                    group = groups.get(msg["from"], 9)
+                    transport.send(msg["from"], reply, group=group)
+                else:
+                    nh_port = nodes_ports.get(msg["from"], None)
+                    if nh_port:
+                        transport.send("127.0.0.1", nh_port, reply)
+            return
+        if msg.get("type") == "PING":
+            #print(f"[PING] Recibido PING de {msg.get('from')} (timestamp={msg.get('timestamp_reply')})")
+            return
+        if msg.get("type") == "TABLE":
+            #print(f"[INFO] Recibida tabla de ruteo de {msg.get('from')}: {msg.get('table')}")
+            return
     if isinstance(algo, Flooding):
         algo.handle_message(msg, transport, nodes_ports)
         return
     if isinstance(algo, LinkState):
-        # Procesar mensajes LSA
-        if msg.get("type") == "LSA":
-            algo.handle_message(msg, transport, nodes_ports)
-            return
+        if hasattr(msg, 'get'):
+            # Procesar mensajes LSA
+            if msg.get("type") == "LSA":
+                algo.handle_message(msg, transport, nodes_ports)
+        else:
+            print("Mensaje recibido sin método 'get':")
+        return
     if isinstance(algo, DistanceVector):
-        if msg.get("type") == "DV_UPDATE":
-            algo.handle_message(msg, transport, nodes_ports)
-            return
+        if hasattr(msg, 'get'):
+
+            if msg.get("type") == "DV_UPDATE":
+                algo.handle_message(msg, transport, nodes_ports)
+        else:
+            print("Mensaje recibido sin método 'get':")
+        return
 
 
 def main():
