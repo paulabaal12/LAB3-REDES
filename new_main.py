@@ -14,7 +14,6 @@ with open("groups.json") as f:
     groups = json.load(f)
 
 nodes_ports = load_names("names-ports.json")
-print(nodes_ports)
 
 
 # ---------- Dijkstra local (devuelve next-hop y distancias + full path) ----------
@@ -67,7 +66,7 @@ def main():
     parser.add_argument("--proto", default="linkstate", help="Proto label to set in messages (dijkstra|linkstate|etc.)")
     parser.add_argument("--hello-interval", type=int, default=3, help="Segs entre HELLOs")
     parser.add_argument("--msg-interval", type=int, default=15, help="Segs entre MESSAGEs")
-    parser.add_argument("--timer-initial", type=int, default=5, help="Timer inicial en segundos para vecinos")
+    parser.add_argument("--timer-initial", type=int, default=6, help="Timer inicial en segundos para vecinos")
     args = parser.parse_args()
 
     node_id = args.id
@@ -76,22 +75,33 @@ def main():
     proto_name = args.proto
 
     # carga topología estática (weights) para conocer pesos iniciales de vecinos
-    static_topo = load_topology(topology_file)   # formato {N1: {N2: w, ...}, ...}
-    nodes_ports = load_names(names_file)         # mapping por si lo necesitas
-    print(static_topo)
+    static_topo = load_topology(topology_file)   
+    nodes_ports = load_names(names_file)    
+
+    print(f"Topo cargada: {static_topo}")
+    #print(f"Nodos: {nodes_ports}")
+
     # neighbors (directos a partir del archivo)
     direct_neighbors = static_topo.get(node_id, {})
+    def to_real_node_name(nodo_name: str) -> str:
+        # Asumimos formato "nodoN"
+        num = nodo_name.lstrip("nodo")
+        return f"sec30.grupo{num}.nodo{num}"
 
     # ---------- Estructura de topología dinámica ----------
-    # topology_local: { node: { neighbor: {"weight": w, "timer": t}, ...}, ... }
+    # topology_local: { sec30.grupoX.nodoY: { neighbor: {"weight": w, "timer": t}, ...}, ... }
     topology_local = {}
     topo_lock = threading.Lock()
 
     # inicializa con nuestro nodo y vecinos directos
     with topo_lock:
-        topology_local[node_id] = {}
+        real_self = to_real_node_name(node_id)
+        topology_local[real_self] = {}
         for n, w in direct_neighbors.items():
-            topology_local[node_id][n] = {"weight": w, "timer": args.timer_initial}
+            real_n = to_real_node_name(n)
+            topology_local[real_self][real_n] = {"weight": w, "timer": args.timer_initial}
+
+
 
     # estado de auto envío
     auto_message_enabled = True
@@ -112,7 +122,12 @@ def main():
                     if node_id not in topology_local:
                         topology_local[node_id] = {}
                     topology_local[node_id][sender] = {"weight": hops, "timer": args.timer_initial}
-                print(f"[HELLO] Updated neighbor {sender} weight={hops} timer={args.timer_initial}")
+
+                    if sender not in topology_local:
+                        topology_local[sender] = {}
+                    topology_local[sender][node_id] = {"weight": hops, "timer": args.timer_initial}
+
+                    print(f"[HELLO] Updated neighbor {sender} weight={hops} timer={args.timer_initial}")
 
             elif mtype == "message":
                 edges = msg.get("edges", [])
@@ -193,11 +208,15 @@ def main():
             removed = []
             with topo_lock:
                 for node, nbrs in list(topology_local.items()):
+                    real_node = node #to_real_node_name(node)
+                    print("--"*30)
+                    print(real_node)
+                    print("--"*30)
                     for neigh, info in list(nbrs.items()):
                         info["timer"] -= 1
                         if info["timer"] <= 0:
-                            del topology_local[node][neigh]
-                            removed.append((node, neigh))
+                            del topology_local[real_node][neigh]
+                            removed.append((real_node, neigh))
                     # if a node has no neighbors, we may keep empty dict
             if removed:
                 for n, m in removed:
@@ -216,9 +235,14 @@ def main():
                 targets = list(direct_neighbors.keys()) if direct_neighbors else list(topology_local.get(node_id, {}).keys())
                 # use weight from static if available else from topology_local
                 targets_info = [(t, direct_neighbors.get(t) or topology_local.get(node_id, {}).get(t, {}).get("weight", 1)) for t in targets]
+                my_node_num = node_id.lstrip("nodo")
+                real_node_id = f"sec30.grupo{my_node_num}.nodo{my_node_num}"
             for (t, w) in targets_info:
-                hello = make_hello_message(proto_name, node_id, t, w)
-                send_to(t, hello)
+                node_num = t.lstrip("nodo")
+                real_t = f"sec30.grupo{node_num}.nodo{node_num}"
+                hello = make_hello_message(proto_name, real_node_id, real_t, w)
+                send_to(real_t, hello)
+
                 # on send we don't modify timers; receiving side will reset
             # sleep the full interval
             for _ in range(args.hello_interval):
@@ -239,6 +263,7 @@ def main():
                     # send all adjacency known in topology_local (as u,v,w)
                     for u, nbrs in topology_local.items():
                         for v, info in nbrs.items():
+                            print(u, v, info)
                             edges.append((u, v, info.get("weight", 1)))
                     # optionally reduce duplicate/reverse edges if you want
                 # send to each direct neighbor (use static direct list if available)

@@ -56,7 +56,8 @@ def on_message(msg):
                 reply["payload"] = "PING"
                 reply["timestamp_reply"] = time.time()
                 if transport.__class__.__name__ == "RedisTransport":
-                    group = groups.get(msg["from"], 9)
+                    group = groups.get(msg["from"], 5)
+                    print(f"GROUP: {group}")
                     transport.send(msg["from"], reply, group=group)
                 else:
                     nh_port = nodes_ports.get(msg["from"], None)

@@ -322,8 +322,8 @@ class RedisTransport:
             import asyncio
             import threading
             group = group if group is not None else self.neighbor_groups.get(target_node, 9)
-            channel = f"sec30.grupo{group}.{target_node}"
-            print(f"[DEBUG][{self.node_id}] Enviando a {target_node} (grupo {group}) por canal: {channel}")
+            channel = f"{target_node}"
+            #print(f"[DEBUG][{self.node_id}] Enviando a {target_node} (grupo {group}) por canal: {channel}")
             # Si estamos en el hilo del loop de Redis, usar create_task
             if self._loop and self._loop.is_running():
                 if threading.current_thread() == self._thread:
