@@ -70,6 +70,12 @@ def main():
     args = parser.parse_args()
 
     node_id = args.id
+    def to_real_node_name(nodo_name: str) -> str:
+        # Asumimos formato "nodoN" o "N9"
+        num = ''.join(filter(str.isdigit, nodo_name))
+        return f"sec30.grupo{num}.nodo{num}"
+
+    real_self = to_real_node_name(node_id)
     topology_file = args.topo
     names_file = args.names
     proto_name = args.proto
@@ -82,23 +88,18 @@ def main():
     #print(f"Nodos: {nodes_ports}")
 
     # neighbors (directos a partir del archivo)
-    direct_neighbors = static_topo.get(node_id, {})
-    def to_real_node_name(nodo_name: str) -> str:
-        # Asumimos formato "nodoN"
-        num = nodo_name.lstrip("nodo")
-        return f"sec30.grupo{num}.nodo{num}"
+    # Convertir claves de static_topo a formato largo
+    direct_neighbors = {to_real_node_name(n): w for n, w in static_topo.get(node_id, {}).items()}
 
     # ---------- Estructura de topología dinámica ----------
     # topology_local: { sec30.grupoX.nodoY: { neighbor: {"weight": w, "timer": t}, ...}, ... }
     topology_local = {}
     topo_lock = threading.Lock()
 
-    # inicializa con nuestro nodo y vecinos directos
+    # inicializa con nuestro nodo y vecinos directos (formato largo)
     with topo_lock:
-        real_self = to_real_node_name(node_id)
         topology_local[real_self] = {}
-        for n, w in direct_neighbors.items():
-            real_n = to_real_node_name(n)
+        for real_n, w in direct_neighbors.items():
             topology_local[real_self][real_n] = {"weight": w, "timer": args.timer_initial}
 
 
@@ -117,32 +118,34 @@ def main():
             sender = msg.get("from")
             if mtype == "hello":
                 hops = msg.get("hops", 1)
-                # reinicia o añade la entrada: topology_local[self][sender]
                 with topo_lock:
-                    if node_id not in topology_local:
-                        topology_local[node_id] = {}
-                    topology_local[node_id][sender] = {"weight": hops, "timer": args.timer_initial}
+                    # Usar siempre formato largo
+                    if real_self not in topology_local:
+                        topology_local[real_self] = {}
+                    topology_local[real_self][sender] = {"weight": hops, "timer": args.timer_initial}
 
                     if sender not in topology_local:
                         topology_local[sender] = {}
-                    topology_local[sender][node_id] = {"weight": hops, "timer": args.timer_initial}
+                    topology_local[sender][real_self] = {"weight": hops, "timer": args.timer_initial}
 
                     print(f"[HELLO] Updated neighbor {sender} weight={hops} timer={args.timer_initial}")
 
             elif mtype == "message":
                 edges = msg.get("edges", [])
-                # edges is list of triples (u,v,w) or dicts; accept both
                 added = 0
                 with topo_lock:
                     for e in edges:
                         if isinstance(e, (list, tuple)) and len(e) >= 3:
                             u, v, w = e[0], e[1], e[2]
                         elif isinstance(e, dict):
-                            # dict like {"u": "N6", "v":"N11", "w":5}
                             u = e.get("u"); v = e.get("v"); w = e.get("w")
                         else:
                             continue
-                        # ensure entries
+                        # Usar formato largo para ambos nodos
+                        if not u.startswith("sec30."):
+                            u = to_real_node_name(u)
+                        if not v.startswith("sec30."):
+                            v = to_real_node_name(v)
                         if u not in topology_local:
                             topology_local[u] = {}
                         topology_local[u][v] = {"weight": w, "timer": args.timer_initial}
@@ -157,14 +160,13 @@ def main():
     # ---------- Inicializar RedisTransport ----------
     # Build neighbor_groups / my_group placeholders if you use grouped channels.
     # For simplicity here we won't use per-group channels: assume transport.publish(target_node)
-    transport = RedisTransport(node_id, on_message)
+    transport = RedisTransport(real_self, on_message)
 
     # start listening (suscribe to own channel by default inside transport)
     # Optionally subscribe to neighbors if your RedisTransport supports it via start_server(subscribe_list=...)
     try:
         transport.start_server(subscribe_list=list(direct_neighbors.keys()))
     except TypeError:
-        # backward compatibility if start_server doesn't accept subscribe_list
         transport.start_server()
 
     print(f"[INFO] Node {node_id} started. Direct neighbors from topo file: {list(direct_neighbors.keys())}")
@@ -190,9 +192,8 @@ def main():
         # fallback: try publish with asyncio via transport.redis if available
         try:
             if hasattr(transport, "redis"):
-                ch = f"sec30.grupo0.{target_node}"
+                ch = target_node if target_node.startswith("sec30.") else to_real_node_name(target_node)
                 s = json.dumps(message)
-                # blocking publish
                 import asyncio
                 asyncio.run(transport.redis.publish(ch, s))
                 return
@@ -208,15 +209,14 @@ def main():
             removed = []
             with topo_lock:
                 for node, nbrs in list(topology_local.items()):
-                    real_node = node #to_real_node_name(node)
                     print("--"*30)
-                    print(real_node)
+                    print(node)
                     print("--"*30)
                     for neigh, info in list(nbrs.items()):
                         info["timer"] -= 1
                         if info["timer"] <= 0:
-                            del topology_local[real_node][neigh]
-                            removed.append((real_node, neigh))
+                            del topology_local[node][neigh]
+                            removed.append((node, neigh))
                     # if a node has no neighbors, we may keep empty dict
             if removed:
                 for n, m in removed:
@@ -231,16 +231,11 @@ def main():
         while not stop_threads:
             # build list of current neighbors to send hello to (keys taken from static topo or dynamic neighbor list)
             with topo_lock:
-                # prefer direct neighbors from static file for sending hello; fallback to dynamic known neighbors
-                targets = list(direct_neighbors.keys()) if direct_neighbors else list(topology_local.get(node_id, {}).keys())
-                # use weight from static if available else from topology_local
-                targets_info = [(t, direct_neighbors.get(t) or topology_local.get(node_id, {}).get(t, {}).get("weight", 1)) for t in targets]
-                my_node_num = node_id.lstrip("nodo")
-                real_node_id = f"sec30.grupo{my_node_num}.nodo{my_node_num}"
-            for (t, w) in targets_info:
-                node_num = t.lstrip("nodo")
-                real_t = f"sec30.grupo{node_num}.nodo{node_num}"
-                hello = make_hello_message(proto_name, real_node_id, real_t, w)
+                # prefer direct neighbors del formato largo
+                targets = list(direct_neighbors.keys()) if direct_neighbors else list(topology_local.get(real_self, {}).keys())
+                targets_info = [(t, direct_neighbors.get(t) or topology_local.get(real_self, {}).get(t, {}).get("weight", 1)) for t in targets]
+            for (real_t, w) in targets_info:
+                hello = make_hello_message(proto_name, real_self, real_t, w)
                 send_to(real_t, hello)
 
                 # on send we don't modify timers; receiving side will reset
@@ -260,18 +255,13 @@ def main():
                 # Prepare edges payload: collect our local view flattened to triples
                 with topo_lock:
                     edges = []
-                    # send all adjacency known in topology_local (as u,v,w)
                     for u, nbrs in topology_local.items():
                         for v, info in nbrs.items():
-                            print(u, v, info)
                             edges.append((u, v, info.get("weight", 1)))
-                    # optionally reduce duplicate/reverse edges if you want
-                # send to each direct neighbor (use static direct list if available)
-                send_targets = list(direct_neighbors.keys()) if direct_neighbors else list(topology_local.get(node_id, {}).keys())
+                send_targets = list(direct_neighbors.keys()) if direct_neighbors else list(topology_local.get(real_self, {}).keys())
                 for t in send_targets:
-                    msg = make_info_message(proto_name, node_id, t, edges)
+                    msg = make_info_message(proto_name, real_self, t, edges)
                     send_to(t, msg)
-                    # slight delay between sends
                     time.sleep(0.05)
             # sleep the full interval
             for _ in range(args.msg_interval):
@@ -298,14 +288,13 @@ def main():
             elif choice == "2":
                 print("Direct neighbors (from topo file):", list(direct_neighbors.keys()))
                 with topo_lock:
-                    print("Neighbors seen in dynamic topology for this node:", list(topology_local.get(node_id, {}).keys()))
+                    print("Neighbors seen in dynamic topology for this node:", list(topology_local.get(real_self, {}).keys()))
             elif choice == "3":
-                # Build weight-only topology for dijkstra
                 with topo_lock:
                     graph = {}
                     for u, nbrs in topology_local.items():
                         graph[u] = {v: info["weight"] for v, info in nbrs.items()}
-                dist, next_hop, prev = dijkstra_full(graph, node_id)
+                dist, next_hop, prev = dijkstra_full(graph, real_self)
                 print("Distances:")
                 for k, d in dist.items():
                     print(f"  {k}: {d}")
@@ -315,15 +304,14 @@ def main():
                 auto_message_enabled = not auto_message_enabled
                 print("Auto MESSAGE is now", "ON" if auto_message_enabled else "OFF")
             elif choice == "5":
-                # manual send one MESSAGE to each direct neighbor
                 with topo_lock:
                     edges = []
                     for u, nbrs in topology_local.items():
                         for v, info in nbrs.items():
                             edges.append((u, v, info.get("weight", 1)))
-                    targets = list(direct_neighbors.keys()) if direct_neighbors else list(topology_local.get(node_id, {}).keys())
+                    targets = list(direct_neighbors.keys()) if direct_neighbors else list(topology_local.get(real_self, {}).keys())
                 for t in targets:
-                    msg = make_info_message(proto_name, node_id, t, edges)
+                    msg = make_info_message(proto_name, real_self, t, edges)
                     send_to(t, msg)
                     print(f"[MANUAL] Sent MESSAGE to {t}")
             elif choice == "6":
