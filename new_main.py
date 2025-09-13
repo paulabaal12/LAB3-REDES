@@ -1,330 +1,201 @@
-# main.py
 import argparse
-import uuid
-import time
-import threading
 import json
-from network.protocol import make_hello_message, make_info_message
-from network.transport import RedisTransport   # **usar solo Redis**
-from network.topo_loader import load_topology, load_names
+import asyncio
+from topology import load_topology, get_neighbors
+from transport import AsyncRedisTransport
+from colorama import Fore, Style, init
+from routing.dijkstra import Dijkstra
+
+# Inicializar colorama
+init(autoreset=True)
+
+TOPOLOGY = {}
+NODE_ID = None
+TRANSPORT = None
+LOCK = asyncio.Lock()
+
+
+def make_hello(from_node, to_node, weight):
+    return {"type": "hello", "from": from_node, "to": to_node, "hops": weight}
+
+
+def make_message(from_node, to_node, weight):
+    return {"type": "message", "from": from_node, "to": to_node, "hops": weight}
+
+
+SEEN_MESSAGES = set()
+
+async def on_message(msg):
+    """Callback ejecutado al recibir mensajes"""
+    global TOPOLOGY, NODE_ID, SEEN_MESSAGES
+    msg_type = msg.get("type")
+    from_node = msg.get("from")
+    to_node = msg.get("to")
+    hops = msg.get("hops")
+
+    if not (msg_type and from_node and to_node and hops is not None):
+        print(f"{Fore.YELLOW}[WARN]{Style.RESET_ALL} Mensaje inválido")
+        return
+
+    # Identificador único para cada enlace aprendido
+    msg_id = f"{from_node}-{to_node}-{hops}"
+
+    async with LOCK:
+        if msg_type == "hello":
+            if from_node in TOPOLOGY.get(NODE_ID, {}):
+                TOPOLOGY[NODE_ID][from_node]["time"] = 5
+                TOPOLOGY[from_node][NODE_ID]["time"] = 5
+                print(f"{Fore.MAGENTA}[HELLO]{Style.RESET_ALL} Refrescada conexión {NODE_ID} <-> {from_node}")
+            else:
+                print(f"{Fore.MAGENTA}[HELLO]{Style.RESET_ALL} Ignorado hello de no-vecino {from_node}")
+
+        elif msg_type == "message":
+            if msg_id in SEEN_MESSAGES:
+                # Ya procesado
+                return
+            SEEN_MESSAGES.add(msg_id)
+
+            # Aprender la conexión
+            if from_node not in TOPOLOGY:
+                TOPOLOGY[from_node] = {}
+            if to_node not in TOPOLOGY:
+                TOPOLOGY[to_node] = {}
+
+            if to_node not in TOPOLOGY[from_node]:
+                TOPOLOGY[from_node][to_node] = {"weight": hops, "time": 15}
+                TOPOLOGY[to_node][from_node] = {"weight": hops, "time": 15}
+                print(f"{Fore.BLUE}[MSG]{Style.RESET_ALL} Aprendida nueva conexión {from_node} <-> {to_node}")
+            else:
+                TOPOLOGY[from_node][to_node]["time"] = 15
+                TOPOLOGY[to_node][from_node]["time"] = 15
+                print(f"{Fore.BLUE}[MSG]{Style.RESET_ALL} Refrescada conexión {from_node} <-> {to_node}")
+
+            # Flooding: reenviar a todos los vecinos excepto quien lo envió
+            for nbr in TOPOLOGY[NODE_ID].keys():
+                if nbr != msg.get("from"):
+                    await TRANSPORT.send(nbr, msg)
+                    print(f"{Fore.CYAN}[FLOOD]{Style.RESET_ALL} Reenviado {from_node} <-> {to_node} a {nbr}")
 
 
 
-with open("groups.json") as f:
-    groups = json.load(f)
+async def decrement_topology():
+    while True:
+        await asyncio.sleep(1)
+        async with LOCK:
+            to_remove = []
+            for node, neighbors in list(TOPOLOGY.items()):
+                for nbr, data in list(neighbors.items()):
+                    data["time"] -= 1
+                    if data["time"] <= 0:
+                        print(f"{Fore.RED}[DELETED]{Style.RESET_ALL} Eliminando conexión {node} <-> {nbr}")
+                        to_remove.append((node, nbr))
+            for node, nbr in to_remove:
+                if nbr in TOPOLOGY.get(node, {}):
+                    del TOPOLOGY[node][nbr]
+                if node in TOPOLOGY.get(nbr, {}):
+                    del TOPOLOGY[nbr][node]
 
-nodes_ports = load_names("names-ports.json")
+
+async def send_hellos(neighbors):
+    global TRANSPORT, NODE_ID
+    while True:
+        await asyncio.sleep(3)
+        async with LOCK:
+            for nbr, data in neighbors.items():
+                msg = make_hello(NODE_ID, nbr, data["weight"])
+                await TRANSPORT.send(nbr, msg)
+                print(f"{Fore.GREEN}[ADDED]{Style.RESET_ALL} Enviando Hello a {nbr}")
 
 
-# ---------- Dijkstra local (devuelve next-hop y distancias + full path) ----------
-import heapq
-def dijkstra_full(topology, src):
-    """
-    topology: { node: { neighbor: weight, ... }, ... }
-    returns: dist, prev
-    """
-    dist = {n: float("inf") for n in topology}
-    prev = {n: None for n in topology}
-    if src not in topology:
-        return {}, {}
-    dist[src] = 0
-    pq = [(0, src)]
-    while pq:
-        d, u = heapq.heappop(pq)
-        if d > dist[u]:
-            continue
-        for v, w in topology.get(u, {}).items():
-            alt = dist[u] + w
-            if alt < dist.get(v, float("inf")):
-                dist[v] = alt
-                prev[v] = u
-                heapq.heappush(pq, (alt, v))
-    # build next-hop table
-    next_hop = {}
-    for dest in topology:
-        if dest == src: continue
-        if dist.get(dest, float("inf")) == float("inf"):
-            continue
-        # walk back to get next hop
-        cur = dest
-        while prev[cur] and prev[cur] != src:
-            cur = prev[cur]
-        if prev[cur] or cur == src:
-            # if prev[cur] is src OR cur==src (direct)
-            # next hop is cur if cur != src else dest
-            nh = cur if cur != src else dest
-            next_hop[dest] = nh
-    return dist, next_hop, prev
+async def send_messages():
+    global TRANSPORT, NODE_ID, TOPOLOGY
+    while True:
+        await asyncio.sleep(10)
+        async with LOCK:
+            for node, neighbors in TOPOLOGY.items():
+                for nbr, data in neighbors.items():
+                    if node == NODE_ID:
+                        for my_nbr in TOPOLOGY[NODE_ID].keys():
+                            msg = make_message(node, nbr, data["weight"])
+                            await TRANSPORT.send(my_nbr, msg)
+                            print(f"{Fore.YELLOW}[UPDATE]{Style.RESET_ALL} Difundiendo conexión {node} <-> {nbr} a {my_nbr}")
 
-# ---------- Programa principal ----------
-def main():
+
+async def menu_loop():
+    global TOPOLOGY
+    while True:
+        print("\n=== MENÚ ===")
+        print("1. Mostrar topología actual")
+        print("2. Ejecutar Dijkstra (pendiente)")
+        print("3. Salir del nodo")
+        opcion = await asyncio.to_thread(input, "Selecciona una opción: ")
+
+        if opcion.strip() == "1":
+            async with LOCK:
+                print("\n[TOPOLOGÍA ACTUAL]")
+                print(json.dumps(TOPOLOGY, indent=2))
+        elif opcion.strip() == "2":
+
+            # obtener vecinos desde la topología aprendida
+            neighbors = list(TOPOLOGY[NODE_ID].keys())
+
+            # inicializar Dijkstra
+            dijkstra = Dijkstra(NODE_ID, neighbors)
+
+            # calcular rutas
+            dijkstra.compute_routes(TOPOLOGY)
+
+            # imprimir tabla
+            dijkstra.printTable()
+            print("[TODO] Implementar Dijkstra")
+        elif opcion.strip() == "3":
+            print("[MAIN] Nodo detenido por usuario")
+            await TRANSPORT.disconnect()
+            raise SystemExit
+        else:
+            print("[WARN] Opción inválida")
+
+
+async def main():
+    global TOPOLOGY, NODE_ID, TRANSPORT
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--id", required=True, help="Node ID (ej. N1)")
-    parser.add_argument("--topo", required=True, help="Archivo de topología (formato N1-N2:20,...)")
-    parser.add_argument("--names", required=True, help="Archivo names-ports o names-jids (para mapping)")
-    parser.add_argument("--transport", default="redis", choices=["redis"], help="Usar redis")
-    parser.add_argument("--proto", default="linkstate", help="Proto label to set in messages (dijkstra|linkstate|etc.)")
-    parser.add_argument("--hello-interval", type=int, default=3, help="Segs entre HELLOs")
-    parser.add_argument("--msg-interval", type=int, default=15, help="Segs entre MESSAGEs")
-    parser.add_argument("--timer-initial", type=int, default=6, help="Timer inicial en segundos para vecinos")
+    parser.add_argument("--id", required=True)
+    parser.add_argument("--topo", required=True)
+    parser.add_argument("--ids", required=True)
+    parser.add_argument("--transport", required=True, choices=["redis"])
     args = parser.parse_args()
 
-    node_id = args.id
-    def to_real_node_name(nodo_name: str) -> str:
-        # Asumimos formato "nodoN" o "N9"
-        num = ''.join(filter(str.isdigit, nodo_name))
-        return f"sec30.grupo{num}.nodo{num}"
+    NODE_ID = args.id
+    full_topology = load_topology(args.topo, args.ids)
+    neighbors = get_neighbors(NODE_ID, full_topology)
 
-    real_self = to_real_node_name(node_id)
-    topology_file = args.topo
-    names_file = args.names
-    proto_name = args.proto
+    TOPOLOGY[NODE_ID] = {}
+    for nbr, data in neighbors.items():
+        TOPOLOGY[NODE_ID][nbr] = {"weight": data["weight"], "time": 5}
+        if nbr not in TOPOLOGY:
+            TOPOLOGY[nbr] = {}
+        TOPOLOGY[nbr][NODE_ID] = {"weight": data["weight"], "time": 5}
 
-    # carga topología estática (weights) para conocer pesos iniciales de vecinos
-    static_topo = load_topology(topology_file)   
-    nodes_ports = load_names(names_file)    
+    print("[INIT] Topología inicial:")
+    print(json.dumps(TOPOLOGY, indent=2))
 
-    print(f"Topo cargada: {static_topo}")
-    #print(f"Nodos: {nodes_ports}")
+    if args.transport == "redis":
+        TRANSPORT = AsyncRedisTransport(
+            node_id=NODE_ID,
+            on_message=on_message,
+            neighbor_ids=list(neighbors.keys())
+        )
+        await TRANSPORT.start_server()
 
-    # neighbors (directos a partir del archivo)
-    # Convertir claves de static_topo a formato largo
-    direct_neighbors = {to_real_node_name(n): w for n, w in static_topo.get(node_id, {}).items()}
+    # Correr todas las tareas en paralelo
+    await asyncio.gather(
+        decrement_topology(),
+        send_hellos(neighbors),
+        send_messages(),
+        menu_loop()
+    )
 
-    # ---------- Estructura de topología dinámica ----------
-    # topology_local: { sec30.grupoX.nodoY: { neighbor: {"weight": w, "timer": t}, ...}, ... }
-    topology_local = {}
-    topo_lock = threading.Lock()
-
-    # inicializa con nuestro nodo y vecinos directos (formato largo)
-    with topo_lock:
-        topology_local[real_self] = {}
-        for real_n, w in direct_neighbors.items():
-            topology_local[real_self][real_n] = {"weight": w, "timer": args.timer_initial}
-
-
-
-    # estado de auto envío
-    auto_message_enabled = True
-    stop_threads = False
-
-    # ---------- Callback cuando llega mensaje ----------
-    def on_message(msg):
-        nonlocal topology_local
-        try:
-            # debug print raw
-            print(f"\n[RECV raw] {msg}")
-            mtype = msg.get("type")
-            sender = msg.get("from")
-            if mtype == "hello":
-                hops = msg.get("hops", 1)
-                with topo_lock:
-                    # Usar siempre formato largo
-                    if real_self not in topology_local:
-                        topology_local[real_self] = {}
-                    topology_local[real_self][sender] = {"weight": hops, "timer": args.timer_initial}
-
-                    if sender not in topology_local:
-                        topology_local[sender] = {}
-                    topology_local[sender][real_self] = {"weight": hops, "timer": args.timer_initial}
-
-                    print(f"[HELLO] Updated neighbor {sender} weight={hops} timer={args.timer_initial}")
-
-            elif mtype == "message":
-                edges = msg.get("edges", [])
-                added = 0
-                with topo_lock:
-                    for e in edges:
-                        if isinstance(e, (list, tuple)) and len(e) >= 3:
-                            u, v, w = e[0], e[1], e[2]
-                        elif isinstance(e, dict):
-                            u = e.get("u"); v = e.get("v"); w = e.get("w")
-                        else:
-                            continue
-                        # Usar formato largo para ambos nodos
-                        if not u.startswith("sec30."):
-                            u = to_real_node_name(u)
-                        if not v.startswith("sec30."):
-                            v = to_real_node_name(v)
-                        if u not in topology_local:
-                            topology_local[u] = {}
-                        topology_local[u][v] = {"weight": w, "timer": args.timer_initial}
-                        added += 1
-                if added:
-                    print(f"[MESSAGE] Added/updated {added} edge(s) from payload by {sender}")
-            else:
-                print(f"[WARN] Unknown message type: {mtype}")
-        except Exception as e:
-            print(f"[on_message] Error processing msg: {e}")
-
-    # ---------- Inicializar RedisTransport ----------
-    # Build neighbor_groups / my_group placeholders if you use grouped channels.
-    # For simplicity here we won't use per-group channels: assume transport.publish(target_node)
-    transport = RedisTransport(real_self, on_message)
-
-    # start listening (suscribe to own channel by default inside transport)
-    # Optionally subscribe to neighbors if your RedisTransport supports it via start_server(subscribe_list=...)
-    try:
-        transport.start_server(subscribe_list=list(direct_neighbors.keys()))
-    except TypeError:
-        transport.start_server()
-
-    print(f"[INFO] Node {node_id} started. Direct neighbors from topo file: {list(direct_neighbors.keys())}")
-
-    # ---------- helper to send robustly (tries multiple call styles) ----------
-    def send_to(target_node, message):
-        # try simple form first
-        try:
-            transport.send(target_node, message)
-            return
-        except TypeError:
-            pass
-        except Exception as e:
-            print(f"[Send] Exception (first try): {e}")
-        # try host,port,message if we have port mapping
-        try:
-            if target_node in nodes_ports:
-                port = nodes_ports[target_node]
-                transport.send("127.0.0.1", port, message)
-                return
-        except Exception as e:
-            print(f"[Send] Exception (second try): {e}")
-        # fallback: try publish with asyncio via transport.redis if available
-        try:
-            if hasattr(transport, "redis"):
-                ch = target_node if target_node.startswith("sec30.") else to_real_node_name(target_node)
-                s = json.dumps(message)
-                import asyncio
-                asyncio.run(transport.redis.publish(ch, s))
-                return
-        except Exception as e:
-            print(f"[Send] Exception (fallback): {e}")
-        print(f"[Send] Could not send to {target_node}")
-
-    # ---------- periodic: decrement timers each second ----------
-    def timer_loop():
-        nonlocal stop_threads
-        while not stop_threads:
-            time.sleep(1)
-            removed = []
-            with topo_lock:
-                for node, nbrs in list(topology_local.items()):
-                    print("--"*30)
-                    print(node)
-                    print("--"*30)
-                    for neigh, info in list(nbrs.items()):
-                        info["timer"] -= 1
-                        if info["timer"] <= 0:
-                            del topology_local[node][neigh]
-                            removed.append((node, neigh))
-                    # if a node has no neighbors, we may keep empty dict
-            if removed:
-                for n, m in removed:
-                    print(f"[TIMER] Removed entry {n} -> {m} due to timeout")
-
-    t_timer = threading.Thread(target=timer_loop, daemon=True)
-    t_timer.start()
-
-    # ---------- periodic: send HELLO every hello_interval seconds ----------
-    def hello_loop():
-        nonlocal stop_threads
-        while not stop_threads:
-            # build list of current neighbors to send hello to (keys taken from static topo or dynamic neighbor list)
-            with topo_lock:
-                # prefer direct neighbors del formato largo
-                targets = list(direct_neighbors.keys()) if direct_neighbors else list(topology_local.get(real_self, {}).keys())
-                targets_info = [(t, direct_neighbors.get(t) or topology_local.get(real_self, {}).get(t, {}).get("weight", 1)) for t in targets]
-            for (real_t, w) in targets_info:
-                hello = make_hello_message(proto_name, real_self, real_t, w)
-                send_to(real_t, hello)
-
-                # on send we don't modify timers; receiving side will reset
-            # sleep the full interval
-            for _ in range(args.hello_interval):
-                if stop_threads: break
-                time.sleep(1)
-
-    t_hello = threading.Thread(target=hello_loop, daemon=True)
-    t_hello.start()
-
-    # ---------- periodic: send MESSAGE every msg_interval seconds ----------
-    def message_loop():
-        nonlocal stop_threads, auto_message_enabled
-        while not stop_threads:
-            if auto_message_enabled:
-                # Prepare edges payload: collect our local view flattened to triples
-                with topo_lock:
-                    edges = []
-                    for u, nbrs in topology_local.items():
-                        for v, info in nbrs.items():
-                            edges.append((u, v, info.get("weight", 1)))
-                send_targets = list(direct_neighbors.keys()) if direct_neighbors else list(topology_local.get(real_self, {}).keys())
-                for t in send_targets:
-                    msg = make_info_message(proto_name, real_self, t, edges)
-                    send_to(t, msg)
-                    time.sleep(0.05)
-            # sleep the full interval
-            for _ in range(args.msg_interval):
-                if stop_threads: break
-                time.sleep(1)
-
-    t_msg = threading.Thread(target=message_loop, daemon=True)
-    t_msg.start()
-
-    # ---------- Interactive menu ----------
-    try:
-        while True:
-            print("\n========== MENU ==========")
-            print("1. Ver topología (dinámica)")
-            print("2. Ver vecinos directos (del fichero)")
-            print("3. Calcular tabla de enrutamiento (Dijkstra)")
-            print("4. Toggle envío automático de MESSAGE (actualmente {})".format("ON" if auto_message_enabled else "OFF"))
-            print("5. Enviar MESSAGE manualmente ahora")
-            print("6. Salir")
-            choice = input("> ").strip()
-            if choice == "1":
-                with topo_lock:
-                    print(json.dumps(topology_local, indent=2))
-            elif choice == "2":
-                print("Direct neighbors (from topo file):", list(direct_neighbors.keys()))
-                with topo_lock:
-                    print("Neighbors seen in dynamic topology for this node:", list(topology_local.get(real_self, {}).keys()))
-            elif choice == "3":
-                with topo_lock:
-                    graph = {}
-                    for u, nbrs in topology_local.items():
-                        graph[u] = {v: info["weight"] for v, info in nbrs.items()}
-                dist, next_hop, prev = dijkstra_full(graph, real_self)
-                print("Distances:")
-                for k, d in dist.items():
-                    print(f"  {k}: {d}")
-                print("Next-hop table:")
-                print(json.dumps(next_hop, indent=2))
-            elif choice == "4":
-                auto_message_enabled = not auto_message_enabled
-                print("Auto MESSAGE is now", "ON" if auto_message_enabled else "OFF")
-            elif choice == "5":
-                with topo_lock:
-                    edges = []
-                    for u, nbrs in topology_local.items():
-                        for v, info in nbrs.items():
-                            edges.append((u, v, info.get("weight", 1)))
-                    targets = list(direct_neighbors.keys()) if direct_neighbors else list(topology_local.get(real_self, {}).keys())
-                for t in targets:
-                    msg = make_info_message(proto_name, real_self, t, edges)
-                    send_to(t, msg)
-                    print(f"[MANUAL] Sent MESSAGE to {t}")
-            elif choice == "6":
-                print("Shutting down...")
-                break
-            else:
-                print("Opción inválida")
-    except KeyboardInterrupt:
-        print("\nInterrupted by user")
-    finally:
-        stop_threads = True
-        transport.disconnect()
-        print("Bye")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

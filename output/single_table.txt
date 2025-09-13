@@ -1,0 +1,16 @@
+
+Tabla de ruteo para nodo sec30.grupo10.nodo10:
+------------------------------------------------------------
+Destino                   Next Hop             Costo
+------------------------------------------------------------
+sec30.grupo1.nodo1        sec30.grupo7.nodo7   7
+sec30.grupo11.nodo11      sec30.grupo7.nodo7   14
+sec30.grupo2.nodo2        sec30.grupo2.nodo2   14
+sec30.grupo3.nodo3        sec30.grupo8.nodo8   21
+sec30.grupo4.nodo4        sec30.grupo8.nodo8   14
+sec30.grupo5.nodo5        sec30.grupo7.nodo7   14
+sec30.grupo6.nodo6        sec30.grupo6.nodo6   15
+sec30.grupo7.nodo7        sec30.grupo7.nodo7   3
+sec30.grupo8.nodo8        sec30.grupo8.nodo8   6
+sec30.grupo9.nodo9        sec30.grupo8.nodo8   22
+------------------------------------------------------------
